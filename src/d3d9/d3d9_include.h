@@ -48,13 +48,20 @@
 #define D3DSWAPEFFECT_COPY_VSYNC 4
 #endif
 
-// MinGW headers are broken. Who'dve guessed?
-#ifndef _MSC_VER
-typedef struct _D3DDEVINFO_RESOURCEMANAGER
-{
-  char dummy;
-} D3DDEVINFO_RESOURCEMANAGER, * LPD3DDEVINFO_RESOURCEMANAGER;
-#endif
+// NOTE: The old "MinGW headers are broken" workaround that redefined
+// struct _D3DDEVINFO_RESOURCEMANAGER here has been REMOVED.
+// Current mingw-w64 d3d9types.h already provides a full definition of
+// this struct, so redefining it here caused:
+//   error: redefinition of 'struct _D3DDEVINFO_RESOURCEMANAGER'
+// If you are using a very old mingw-w64 toolchain that lacks this
+// struct, uncomment the block below instead of deleting it.
+//
+// #ifndef _MSC_VER
+// typedef struct _D3DDEVINFO_RESOURCEMANAGER
+// {
+//   char dummy;
+// } D3DDEVINFO_RESOURCEMANAGER, * LPD3DDEVINFO_RESOURCEMANAGER;
+// #endif
 
 // This is the managed pool on D3D9Ex, it's just hidden!
 #define D3DPOOL_MANAGED_EX D3DPOOL(6)
@@ -104,4 +111,3 @@ IDirect3DDevice9On12 : public IUnknown {
 #ifndef _MSC_VER
 __CRT_UUID_DECL(IDirect3DDevice9On12,      0xe7fda234,0xb589,0x4049,0x94,0x0d,0x88,0x78,0x97,0x75,0x31,0xc8);
 #endif
-
