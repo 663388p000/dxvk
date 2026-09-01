@@ -1,0 +1,41 @@
+name: Artifacts (Package)
+
+on: [push, pull_request, workflow_dispatch]
+
+jobs:
+  artifacts-mingw-w64:
+    runs-on: ubuntu-22.04
+
+    steps:
+    - name: Checkout code
+      id: checkout-code
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
+        fetch-depth: 0
+
+    - name: Setup problem matcher
+      uses: Joshua-Ashton/gcc-problem-matcher@v3
+
+    - name: Get version
+      id: get-version
+      shell: bash
+      run: |
+        echo "VERSION_NAME=${GITHUB_REF_NAME//\//-}-${GITHUB_SHA::8}" >> $GITHUB_ENV
+        echo "VERSION=$(cat RELEASE)" >> $GITHUB_ENV
+
+    - name: Build dist tree
+      id: build-dist
+      uses: WinterSnowfall/arch-mingw-github-action@v2
+      with:
+        command: |
+          make
+          make dist
+
+    - name: Upload artifacts
+      id: upload-artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: dxvk-sarek-${{ env.VERSION_NAME }}
+        path: build/dist/dxvk-sarek-${{ env.VERSION }}
+        if-no-files-found: error
