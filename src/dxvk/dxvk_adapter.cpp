@@ -278,34 +278,6 @@ namespace dxvk {
     DxvkDeviceExtensions devExtensions;
     auto devExtensionList = getExtensionList(devExtensions);
 
-    // Only enable Cuda interop extensions in 64-bit builds in
-    // order to avoid potential driver or address space issues.
-    // VK_KHR_buffer_device_address is expensive on some drivers.
-    bool enableCudaInterop = !env::is32BitHostPlatform() &&
-      m_deviceExtensions.supports(devExtensions.nvxBinaryImport.name()) &&
-      m_deviceExtensions.supports(devExtensions.nvxImageViewHandle.name()) &&
-      m_deviceFeatures.vk12.bufferDeviceAddress;
-
-    if (enableCudaInterop) {
-      devExtensions.nvxBinaryImport.setMode(DxvkExtMode::Optional);
-      devExtensions.nvxImageViewHandle.setMode(DxvkExtMode::Optional);
-
-      enabledFeatures.vk12.bufferDeviceAddress = VK_TRUE;
-    }
-
-    // Disable NV_low_latency2 on 32-bit due to buggy latency sleep
-    // behaviour, or if explicitly set via the onfig file.
-    bool disableNvLowLatency2 = env::is32BitHostPlatform();
-    applyTristate(disableNvLowLatency2, instance->options().disableNvLowLatency2);
-
-    if (disableNvLowLatency2)
-      devExtensions.nvLowLatency2.setMode(DxvkExtMode::Disabled);
-
-    // If we don't have pageable device memory support, at least use
-    // the legacy AMD extension to ensure we can oversubscribe VRAM
-    if (!m_deviceExtensions.supports(devExtensions.extPageableDeviceLocalMemory.name()))
-      devExtensions.amdMemoryOverallocationBehaviour.setMode(DxvkExtMode::Optional);
-
     DxvkNameSet extensionsEnabled;
 
     if (!m_deviceExtensions.enableExtensions(
@@ -363,10 +335,8 @@ namespace dxvk {
     enabledFeatures.vk13.synchronization2 = VK_TRUE;
     enabledFeatures.vk13.dynamicRendering = VK_TRUE;
 
-    // Maintenance4 may cause performance problems on amdvlk in some cases
-    if (m_deviceInfo.vk12.driverID != VK_DRIVER_ID_AMD_OPEN_SOURCE
-     && m_deviceInfo.vk12.driverID != VK_DRIVER_ID_AMD_PROPRIETARY)
-      enabledFeatures.vk13.maintenance4 = VK_TRUE;
+    // Maintenance4 - keep conditional on actual device support
+    enabledFeatures.vk13.maintenance4 = m_deviceFeatures.vk13.maintenance4;
 
     // We expose depth clip rather than depth clamp to client APIs
     enabledFeatures.extDepthClipEnable.depthClipEnable =
@@ -438,20 +408,6 @@ namespace dxvk {
       m_deviceFeatures.khrPresentId.presentId &&
       m_deviceFeatures.khrPresentWait.presentWait;
 
-    // Unless we're on an Nvidia driver where these extensions are known to be broken
-    if (matchesDriver(VK_DRIVER_ID_NVIDIA_PROPRIETARY, Version(), Version(535, 0, 0))) {
-      enabledFeatures.khrPresentId.presentId = VK_FALSE;
-      enabledFeatures.khrPresentWait.presentWait = VK_FALSE;
-    }
-
-    // Enable descriptor pool overallocation if supported
-    enabledFeatures.nvDescriptorPoolOverallocation.descriptorPoolOverallocation =
-      m_deviceFeatures.nvDescriptorPoolOverallocation.descriptorPoolOverallocation;
-
-    // Enable raw access chains for shader backends
-    enabledFeatures.nvRawAccessChains.shaderRawAccessChains =
-      m_deviceFeatures.nvRawAccessChains.shaderRawAccessChains;
-
     // Create pNext chain for additional device features
     initFeatureChain(enabledFeatures, devExtensions, instance->extensions());
 
@@ -463,10 +419,6 @@ namespace dxvk {
     Logger::info("Enabled device extensions:");
     this->logNameList(extensionNameList);
     this->logFeatures(enabledFeatures);
-
-    // Report the desired overallocation behaviour to the driver
-    VkDeviceMemoryOverallocationCreateInfoAMD overallocInfo = { VK_STRUCTURE_TYPE_DEVICE_MEMORY_OVERALLOCATION_CREATE_INFO_AMD };
-    overallocInfo.overallocationBehavior = VK_MEMORY_OVERALLOCATION_BEHAVIOR_ALLOWED_AMD;
 
     // Create the requested queues
     float queuePriority = 1.0f;
@@ -498,29 +450,8 @@ namespace dxvk {
     info.ppEnabledExtensionNames    = extensionNameList.names();
     info.pEnabledFeatures           = &enabledFeatures.core.features;
 
-    if (devExtensions.amdMemoryOverallocationBehaviour)
-      overallocInfo.pNext = std::exchange(info.pNext, &overallocInfo);
-    
     VkDevice device = VK_NULL_HANDLE;
     VkResult vr = m_vki->vkCreateDevice(m_handle, &info, nullptr, &device);
-
-    if (vr != VK_SUCCESS && enableCudaInterop) {
-      // Enabling certain Vulkan extensions can cause device creation to fail on
-      // Nvidia drivers if a certain kernel module isn't loaded, but we cannot know
-      // that in advance since the extensions are reported as supported anyway.
-      Logger::err("DxvkAdapter: Failed to create device, retrying without CUDA interop extensions");
-
-      extensionsEnabled.disableExtension(devExtensions.nvxBinaryImport);
-      extensionsEnabled.disableExtension(devExtensions.nvxImageViewHandle);
-
-      enabledFeatures.vk12.bufferDeviceAddress = VK_FALSE;
-
-      extensionNameList = extensionsEnabled.toNameList();
-      info.enabledExtensionCount      = extensionNameList.count();
-      info.ppEnabledExtensionNames    = extensionNameList.names();
-
-      vr = m_vki->vkCreateDevice(m_handle, &info, nullptr, &device);
-    }
 
     if (vr != VK_SUCCESS)
       throw DxvkError("DxvkAdapter: Failed to create device");
@@ -646,14 +577,6 @@ namespace dxvk {
 
         case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_WAIT_FEATURES_KHR:
           enabledFeatures.khrPresentWait = *reinterpret_cast<const VkPhysicalDevicePresentWaitFeaturesKHR*>(f);
-          break;
-
-        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_POOL_OVERALLOCATION_FEATURES_NV:
-          enabledFeatures.nvDescriptorPoolOverallocation = *reinterpret_cast<const VkPhysicalDeviceDescriptorPoolOverallocationFeaturesNV*>(f);
-          break;
-
-        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAW_ACCESS_CHAINS_FEATURES_NV:
-          enabledFeatures.nvRawAccessChains = *reinterpret_cast<const VkPhysicalDeviceRawAccessChainsFeaturesNV*>(f);
           break;
 
         default:
@@ -799,11 +722,6 @@ namespace dxvk {
       m_deviceInfo.extLineRasterization.pNext = std::exchange(m_deviceInfo.core.pNext, &m_deviceInfo.extLineRasterization);
     }
 
-    if (m_deviceExtensions.supports(VK_EXT_MULTI_DRAW_EXTENSION_NAME)) {
-      m_deviceInfo.extMultiDraw.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTI_DRAW_PROPERTIES_EXT;
-      m_deviceInfo.extMultiDraw.pNext = std::exchange(m_deviceInfo.core.pNext, &m_deviceInfo.extMultiDraw);
-    }
-
     if (m_deviceExtensions.supports(VK_EXT_ROBUSTNESS_2_EXTENSION_NAME)) {
       m_deviceInfo.extRobustness2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_PROPERTIES_EXT;
       m_deviceInfo.extRobustness2.pNext = std::exchange(m_deviceInfo.core.pNext, &m_deviceInfo.extRobustness2);
@@ -812,11 +730,6 @@ namespace dxvk {
     if (m_deviceExtensions.supports(VK_EXT_TRANSFORM_FEEDBACK_EXTENSION_NAME)) {
       m_deviceInfo.extTransformFeedback.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TRANSFORM_FEEDBACK_PROPERTIES_EXT;
       m_deviceInfo.extTransformFeedback.pNext = std::exchange(m_deviceInfo.core.pNext, &m_deviceInfo.extTransformFeedback);
-    }
-
-    if (m_deviceExtensions.supports(VK_EXT_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME)) {
-      m_deviceInfo.extVertexAttributeDivisor.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_PROPERTIES_EXT;
-      m_deviceInfo.extVertexAttributeDivisor.pNext = std::exchange(m_deviceInfo.core.pNext, &m_deviceInfo.extVertexAttributeDivisor);
     }
 
     if (m_deviceExtensions.supports(VK_KHR_MAINTENANCE_5_EXTENSION_NAME)) {
@@ -846,9 +759,6 @@ namespace dxvk {
 
     m_deviceFeatures.vk13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
     m_deviceFeatures.vk13.pNext = std::exchange(m_deviceFeatures.core.pNext, &m_deviceFeatures.vk13);
-
-    if (m_deviceExtensions.supports(VK_AMD_SHADER_FRAGMENT_MASK_EXTENSION_NAME))
-      m_deviceFeatures.amdShaderFragmentMask = VK_TRUE;
 
     if (m_deviceExtensions.supports(VK_EXT_ATTACHMENT_FEEDBACK_LOOP_LAYOUT_EXTENSION_NAME)) {
       m_deviceFeatures.extAttachmentFeedbackLoopLayout.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ATTACHMENT_FEEDBACK_LOOP_LAYOUT_FEATURES_EXT;
@@ -974,22 +884,6 @@ namespace dxvk {
       m_deviceFeatures.khrPresentWait.pNext = std::exchange(m_deviceFeatures.core.pNext, &m_deviceFeatures.khrPresentWait);
     }
 
-    if (m_deviceExtensions.supports(VK_NV_DESCRIPTOR_POOL_OVERALLOCATION_EXTENSION_NAME)) {
-      m_deviceFeatures.nvDescriptorPoolOverallocation.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_POOL_OVERALLOCATION_FEATURES_NV;
-      m_deviceFeatures.nvDescriptorPoolOverallocation.pNext = std::exchange(m_deviceFeatures.core.pNext, &m_deviceFeatures.nvDescriptorPoolOverallocation);
-    }
-
-    if (m_deviceExtensions.supports(VK_NV_RAW_ACCESS_CHAINS_EXTENSION_NAME)) {
-      m_deviceFeatures.nvRawAccessChains.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAW_ACCESS_CHAINS_FEATURES_NV;
-      m_deviceFeatures.nvRawAccessChains.pNext = std::exchange(m_deviceFeatures.core.pNext, &m_deviceFeatures.nvRawAccessChains);
-    }
-
-    if (m_deviceExtensions.supports(VK_NVX_BINARY_IMPORT_EXTENSION_NAME))
-      m_deviceFeatures.nvxBinaryImport = VK_TRUE;
-
-    if (m_deviceExtensions.supports(VK_NVX_IMAGE_VIEW_HANDLE_EXTENSION_NAME))
-      m_deviceFeatures.nvxImageViewHandle = VK_TRUE;
-
     m_vki->vkGetPhysicalDeviceFeatures2(m_handle, &m_deviceFeatures.core);
   }
 
@@ -1020,8 +914,6 @@ namespace dxvk {
   std::vector<DxvkExt*> DxvkAdapter::getExtensionList(
           DxvkDeviceExtensions&   devExtensions) {
     return {{
-      &devExtensions.amdMemoryOverallocationBehaviour,
-      &devExtensions.amdShaderFragmentMask,
       &devExtensions.extAttachmentFeedbackLoopLayout,
       &devExtensions.extConservativeRasterization,
       &devExtensions.extCustomBorderColor,
@@ -1053,11 +945,6 @@ namespace dxvk {
       &devExtensions.khrPresentWait,
       &devExtensions.khrSwapchain,
       &devExtensions.khrWin32KeyedMutex,
-      &devExtensions.nvDescriptorPoolOverallocation,
-      &devExtensions.nvLowLatency2,
-      &devExtensions.nvRawAccessChains,
-      &devExtensions.nvxBinaryImport,
-      &devExtensions.nvxImageViewHandle,
     }};
   }
 
@@ -1077,9 +964,6 @@ namespace dxvk {
 
     enabledFeatures.vk13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
     enabledFeatures.vk13.pNext = std::exchange(enabledFeatures.core.pNext, &enabledFeatures.vk13);
-
-    if (devExtensions.amdShaderFragmentMask)
-      enabledFeatures.amdShaderFragmentMask = VK_TRUE;
 
     if (devExtensions.extAttachmentFeedbackLoopLayout) {
       enabledFeatures.extAttachmentFeedbackLoopLayout.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ATTACHMENT_FEEDBACK_LOOP_LAYOUT_FEATURES_EXT;
@@ -1205,25 +1089,6 @@ namespace dxvk {
       enabledFeatures.khrPresentWait.pNext = std::exchange(enabledFeatures.core.pNext, &enabledFeatures.khrPresentWait);
     }
 
-    if (devExtensions.nvDescriptorPoolOverallocation) {
-      enabledFeatures.nvDescriptorPoolOverallocation.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_POOL_OVERALLOCATION_FEATURES_NV;
-      enabledFeatures.nvDescriptorPoolOverallocation.pNext = std::exchange(enabledFeatures.core.pNext, &enabledFeatures.nvDescriptorPoolOverallocation);
-    }
-
-    if (devExtensions.nvLowLatency2.revision() >= 2)
-      enabledFeatures.nvLowLatency2 = VK_TRUE;
-
-    if (devExtensions.nvRawAccessChains) {
-      enabledFeatures.nvRawAccessChains.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAW_ACCESS_CHAINS_FEATURES_NV;
-      enabledFeatures.nvRawAccessChains.pNext = std::exchange(enabledFeatures.core.pNext, &enabledFeatures.nvRawAccessChains);
-    }
-
-    if (devExtensions.nvxBinaryImport)
-      enabledFeatures.nvxBinaryImport = VK_TRUE;
-
-    if (devExtensions.nvxImageViewHandle)
-      enabledFeatures.nvxImageViewHandle = VK_TRUE;
-
     if (devExtensions.khrWin32KeyedMutex)
       enabledFeatures.khrWin32KeyedMutex = VK_TRUE;
   }
@@ -1296,8 +1161,6 @@ namespace dxvk {
       "\n  shaderZeroInitializeWorkgroupMemory    : ", features.vk13.shaderZeroInitializeWorkgroupMemory,
       "\n  synchronization2                       : ", features.vk13.synchronization2,
       "\n  dynamicRendering                       : ", features.vk13.dynamicRendering,
-      "\n", VK_AMD_SHADER_FRAGMENT_MASK_EXTENSION_NAME,
-      "\n  extension supported                    : ", features.amdShaderFragmentMask ? "1" : "0",
       "\n", VK_EXT_ATTACHMENT_FEEDBACK_LOOP_LAYOUT_EXTENSION_NAME,
       "\n  attachmentFeedbackLoopLayout           : ", features.extAttachmentFeedbackLoopLayout.attachmentFeedbackLoopLayout ? "1" : "0",
       "\n", VK_EXT_CONSERVATIVE_RASTERIZATION_EXTENSION_NAME,
@@ -1368,16 +1231,6 @@ namespace dxvk {
       "\n  presentId                              : ", features.khrPresentId.presentId ? "1" : "0",
       "\n", VK_KHR_PRESENT_WAIT_EXTENSION_NAME,
       "\n  presentWait                            : ", features.khrPresentWait.presentWait ? "1" : "0",
-      "\n", VK_NV_DESCRIPTOR_POOL_OVERALLOCATION_EXTENSION_NAME,
-      "\n  descriptorPoolOverallocation           : ", features.nvDescriptorPoolOverallocation.descriptorPoolOverallocation ? "1" : "0",
-      "\n", VK_NV_LOW_LATENCY_2_EXTENSION_NAME,
-      "\n  extension supported                    : ", features.nvLowLatency2 ? "1" : "0",
-      "\n", VK_NV_RAW_ACCESS_CHAINS_EXTENSION_NAME,
-      "\n  shaderRawAccessChains                  : ", features.nvRawAccessChains.shaderRawAccessChains ? "1" : "0",
-      "\n", VK_NVX_BINARY_IMPORT_EXTENSION_NAME,
-      "\n  extension supported                    : ", features.nvxBinaryImport ? "1" : "0",
-      "\n", VK_NVX_IMAGE_VIEW_HANDLE_EXTENSION_NAME,
-      "\n  extension supported                    : ", features.nvxImageViewHandle ? "1" : "0",
       "\n", VK_KHR_WIN32_KEYED_MUTEX_EXTENSION_NAME,
       "\n  extension supported                    : ", features.khrWin32KeyedMutex ? "1" : "0"));
   }
